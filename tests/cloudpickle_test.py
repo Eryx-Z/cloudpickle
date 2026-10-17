@@ -2526,6 +2526,39 @@ class CloudPickleTest(unittest.TestCase):
         inner_func = depickled_factory()
         assert inner_func() == _TEST_GLOBAL_VARIABLE
 
+    def test_class_body_reads_globals_by_value(self):
+        # Issue #609: globals read only inside a nested class body must be
+        # pickled for by-value functions.
+        ns = {"__name__": "not_importable", "CONST": 42}
+        exec(
+            "def f():\n"
+            "    class Rec:\n"
+            "        q = CONST\n"
+            "    return Rec.q\n",
+            ns,
+        )
+        self.assertEqual(ns["f"](), 42)
+        self.assertEqual(pickle_depickle(ns["f"], protocol=self.protocol)(), 42)
+
+    def test_class_body_local_shadow_skips_unpicklable_global(self):
+        # A class-local assignment that shadows an unpicklable global must not
+        # pull that global into the pickled function state.
+        import threading
+
+        ns = {"__name__": "not_importable", "resource": threading.Lock()}
+        exec(
+            "def factory():\n"
+            "    class Record:\n"
+            "        resource = 42\n"
+            "        value = resource\n"
+            "    return Record.value\n",
+            ns,
+        )
+        self.assertEqual(ns["factory"](), 42)
+        self.assertEqual(
+            pickle_depickle(ns["factory"], protocol=self.protocol)(), 42
+        )
+
     # TODO: remove this xfail when we drop support for Python 3.8. We don't
     # plan to fix it because Python 3.8 is EOL.
     @pytest.mark.skipif(

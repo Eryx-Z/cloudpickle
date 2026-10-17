@@ -55,6 +55,7 @@ from collections import ChainMap, OrderedDict
 import abc
 import builtins
 import copyreg
+import inspect
 import dataclasses
 import dis
 from enum import Enum
@@ -396,6 +397,13 @@ LOAD_GLOBAL = opcode.opmap["LOAD_GLOBAL"]
 _glbl_ops.append(LOAD_GLOBAL)
 GLOBAL_OPS = tuple(_glbl_ops)
 del _glbl_ops
+
+# Class bodies compile global reads as LOAD_NAME (and, on 3.12+, sometimes as
+# LOAD_FROM_DICT_OR_GLOBALS for annotations / type aliases), not LOAD_GLOBAL.
+LOAD_NAME = opcode.opmap["LOAD_NAME"]
+STORE_NAME = opcode.opmap["STORE_NAME"]
+LOAD_FROM_DICT_OR_GLOBALS = opcode.opmap.get("LOAD_FROM_DICT_OR_GLOBALS")
+
 HAVE_ARGUMENT = dis.HAVE_ARGUMENT
 EXTENDED_ARG = dis.EXTENDED_ARG
 
@@ -416,10 +424,34 @@ def _builtin_type(name):
 
 
 def _walk_global_ops(code):
-    """Yield referenced name for global-referencing instructions in code."""
+    """Yield referenced name for global-referencing instructions in code.
+
+    Function code uses LOAD_GLOBAL / STORE_GLOBAL. Class bodies instead use
+    LOAD_NAME for names looked up in the class namespace (falling back to
+    globals). To avoid treating a class-local assignment that shadows an
+    unpicklable global as a global read, LOAD_NAME only counts as a global
+    reference when it appears before any STORE_NAME of the same name in that
+    code object.
+    """
+    # Class bodies are not CO_OPTIMIZED; function/comprehension code is.
+    class_body = not (code.co_flags & inspect.CO_OPTIMIZED)
+    seen_stores = set()
+
     for instr in dis.get_instructions(code):
         op = instr.opcode
         if op in GLOBAL_OPS:
+            yield instr.argval
+        elif class_body and op == STORE_NAME:
+            seen_stores.add(instr.argval)
+        elif class_body and op == LOAD_NAME:
+            if instr.argval not in seen_stores:
+                yield instr.argval
+        elif (
+            class_body
+            and LOAD_FROM_DICT_OR_GLOBALS is not None
+            and op == LOAD_FROM_DICT_OR_GLOBALS
+        ):
+            # Type aliases / lazy annotations look up missing names in globals.
             yield instr.argval
 
 
